@@ -21,23 +21,25 @@ class ReviewMessage {
 }
 
 class Blackboard {
-    private final BlockingQueue<ReviewMessage> messages = new LinkedBlockingQueue<>();
-
-    // Adauga un mesaj in Blackboard
-    public void addMessage(ReviewMessage message) throws InterruptedException {
-        messages.put(message);
+    private final List<BlockingQueue<ReviewMessage>> queues;  // Cozi pentru fiecare etapă
+    
+    public Blackboard(int numStages) {
+        queues = new ArrayList<>();
+        for (int i = 0; i < numStages; i++) {
+            queues.add(new LinkedBlockingQueue<>());
+        }
     }
 
-    // Preia un mesaj din Blackboard
-    public ReviewMessage getMessage() throws InterruptedException {
-        return messages.take(); // Folosește take() pentru blocare
+    // Adaugă mesaj la o anumită etapă (coadă)
+    public void addToStage(int stage, ReviewMessage message) throws InterruptedException {
+        queues.get(stage).put(message);
     }
-    // Verifica daca Blackboard-ul este gol
-    public boolean isEmpty() {
-        return messages.isEmpty();
+
+    // Preia mesaj de la o anumită etapă (coadă)
+    public ReviewMessage getFromStage(int stage) throws InterruptedException {
+        return queues.get(stage).poll(100, TimeUnit.MILLISECONDS); 
     }
 }
-
 class ClientConfig {
     boolean resizeImages;
     boolean checkBuyer;
@@ -66,11 +68,15 @@ interface Filter {
 
 class CheckProfanitiesFilter implements Filter {
     private final ClientConfig config;
+    private final int inputStage;   // Etapa (coada) de intrare
+    private final int outputStage;  // Etapa (coada) de ieșire
     private long processingTime = 0; 
     private int processedMessages = 0;
 
-    public CheckProfanitiesFilter(ClientConfig config) {
+    public CheckProfanitiesFilter(ClientConfig config, int inputStage, int outputStage) {
         this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
     }
 
     @Override
@@ -78,27 +84,32 @@ class CheckProfanitiesFilter implements Filter {
         try {
             while (true) {
                 long startTime = System.currentTimeMillis();
-                ReviewMessage message = blackboard.getMessage();
-                if (message == null) 
-                    continue;
+                // Preia mesaj din coada de intrare
+                ReviewMessage message = blackboard.getFromStage(inputStage);
+                if (message == null) continue;
+
+                // Propagă mesajul de END către următoarea etapă
                 if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
+                    blackboard.addToStage(outputStage, message);
                     break;
                 }
 
-                // Verifica daca filtrul este activat si daca mesajul contine profanitati
+                // Procesare: elimină mesajele cu profanități
                 if (config.checkProfanities && message.reviewText.contains("@#$%")) {
-                    continue; // Ignora mesajul daca contine profanitati
+                    continue; // Nu adăuga mesajul în următoarea coadă
                 }
-                blackboard.addMessage(message);
+
+                // Trimite mesajul la următoarea etapă
+                blackboard.addToStage(outputStage, message);
                 processedMessages++;
-                long endTime = System.currentTimeMillis();
-                processingTime += (endTime - startTime);
+                long endTime = System.currentTimeMillis(); 
+                processingTime += (endTime - startTime); 
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
     }
+    
     public long getProcessingTime() {
         return processingTime;
     }
@@ -107,135 +118,48 @@ class CheckProfanitiesFilter implements Filter {
         return processedMessages;
     }
 }
-
 class CheckBuyerFilter implements Filter {
     private final Map<String, String> buyers;
     private final ClientConfig config;
-    private long processingTime = 0; 
-    private int processedMessages = 0;
-
-    public CheckBuyerFilter(Map<String, String> buyers, ClientConfig config) {
-        this.buyers = buyers;
-        this.config = config;
-    }
-
-    @Override
-    public void process(Blackboard blackboard) {
-        try {
-            while (true) {
-                ReviewMessage message = blackboard.getMessage();
-                long startTime = System.currentTimeMillis();
-                if (message == null) 
-                    continue;
-                if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
-                    break;
-                }
-
-                // Verifica daca filtrul este activat si daca utilizatorul a cumparat produsul
-                if (config.checkBuyer && !buyers.getOrDefault(message.username, "").equals(message.product)) {
-                    continue; // Ignora mesajul daca utilizatorul nu a cumparat produsul
-                }
-                blackboard.addMessage(message);
-                processedMessages++;
-                long endTime = System.currentTimeMillis();
-                processingTime += (endTime - startTime);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-    public long getProcessingTime() {
-        return processingTime;
-    }
-
-    public int getProcessedMessages() {
-        return processedMessages;
-    }
-}
-
-class ResizeImagesFilter implements Filter {
-    private final ClientConfig config;
-    private long processingTime = 0; 
-    private int processedMessages = 0;
-
-    public ResizeImagesFilter(ClientConfig config) {
-        this.config = config;
-    }
-
-    @Override
-    public void process(Blackboard blackboard) {
-        try {
-            while (true) {
-                long startTime = System.currentTimeMillis();
-                ReviewMessage message = blackboard.getMessage();
-                if (message == null) 
-                    continue;
-                if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
-                    break;
-                }
-
-                // Redimensioneaza atasamentul daca filtrul este activat
-                if (config.resizeImages && message.attachment != null) {
-                    message.attachment = message.attachment.toLowerCase();
-                }
-                blackboard.addMessage(message);
-                processedMessages++;
-                long endTime = System.currentTimeMillis();
-                processingTime += (endTime - startTime);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-    public long getProcessingTime() {
-        return processingTime;
-    }
-
-    public int getProcessedMessages() {
-        return processedMessages;
-    }
-}
-
-class SentimentDetectionFilter implements Filter {
-    private final ClientConfig config;
-    private long processingTime = 0; 
+    private final int inputStage;   // Etapa de intrare
+    private final int outputStage;  // Etapa de ieșire
+    private long processingTime = 0;
     private int processedMessages = 0; 
 
-    public SentimentDetectionFilter(ClientConfig config) {
+    public CheckBuyerFilter(Map<String, String> buyers, ClientConfig config, int inputStage, int outputStage) {
+        this.buyers = buyers;
         this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
     }
 
     @Override
     public void process(Blackboard blackboard) {
         try {
             while (true) {
-                ReviewMessage message = blackboard.getMessage();
-                long startTime = System.currentTimeMillis();
-                if (message == null) 
-                    continue;
+                long startTime = System.currentTimeMillis(); // Masurarea timpului de inceput
+                // Preia mesaj din coada corespunzătoare etapei de intrare
+                ReviewMessage message = blackboard.getFromStage(inputStage);
+                if (message == null) continue;
+
+                // Propagă mesajul de END către următoarea etapă
                 if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
+                    blackboard.addToStage(outputStage, message);
                     break;
                 }
 
-                // Detecteaza sentimentul daca filtrul este activat
-                if (config.detectSentiment && message.reviewText != null) {
-                    int upperCaseCount = 0, lowerCaseCount = 0;
-                    for (char c : message.reviewText.toCharArray()) {
-                        if (Character.isUpperCase(c)) upperCaseCount++;
-                        else if (Character.isLowerCase(c)) lowerCaseCount++;
+                // Verifică dacă utilizatorul a cumpărat produsul (doar dacă este activat în config)
+                if (config.checkBuyer) {
+                    String purchasedProduct = buyers.getOrDefault(message.username, "");
+                    if (!purchasedProduct.equals(message.product)) {
+                        continue; // Sarim peste mesaj dacă nu este valid
                     }
-
-                    // Adauga un simbol in functie de numarul de litere mari si mici
-                    if (upperCaseCount > lowerCaseCount) message.reviewText += "+";
-                    else if (lowerCaseCount > upperCaseCount) message.reviewText += "-";
-                    else message.reviewText += "=";
                 }
-                blackboard.addMessage(message);
+
+        
+                blackboard.addToStage(outputStage, message);
                 processedMessages++;
-                long endTime = System.currentTimeMillis();
+                long endTime = System.currentTimeMillis(); 
                 processingTime += (endTime - startTime); 
             }
         } catch (InterruptedException e) {
@@ -253,34 +177,154 @@ class SentimentDetectionFilter implements Filter {
 
 class CheckPoliticalPropagandaFilter implements Filter {
     private final ClientConfig config;
-    private long processingTime = 0;
-    private int processedMessages = 0; 
+    private final int inputStage;   // Etapa de intrare
+    private final int outputStage;  // Etapa de ieșire
+    private long processingTime = 0; 
+    private int processedMessages = 0;
 
-    public CheckPoliticalPropagandaFilter(ClientConfig config) {
+    public CheckPoliticalPropagandaFilter(ClientConfig config, int inputStage, int outputStage) {
         this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
     }
 
     @Override
     public void process(Blackboard blackboard) {
         try {
             while (true) {
-                ReviewMessage message = blackboard.getMessage();
                 long startTime = System.currentTimeMillis();
+                // Preia mesaj din coada corespunzătoare etapei de intrare
+                ReviewMessage message = blackboard.getFromStage(inputStage);
                 if (message == null) continue;
+
+                // Propagă mesajul de END către următoarea etapă
                 if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
+                    blackboard.addToStage(outputStage, message);
                     break;
                 }
 
-          
-                if (config.checkPoliticalPropaganda && 
-                    (message.reviewText.contains("+++") || message.reviewText.contains("---"))) {
-                    continue; 
+                // Verifică propagandă politică (doar dacă este activat în config)
+                if (config.checkPoliticalPropaganda) {
+                    String text = message.reviewText;
+                    if (text.contains("+++") || text.contains("---")) {
+                        continue; // Sarim peste mesaj dacă conține șabloane suspecte
+                    }
                 }
-                blackboard.addMessage(message);
+
+                // Trimite mesajul la următoarea etapă
+                blackboard.addToStage(outputStage, message);
                 processedMessages++;
                 long endTime = System.currentTimeMillis();
-                processingTime += (endTime - startTime);
+                processingTime += (endTime - startTime); 
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+    public long getProcessingTime() {
+        return processingTime;
+    }
+
+    public int getProcessedMessages() {
+        return processedMessages;
+    }
+}
+
+class ResizeImagesFilter implements Filter {
+    private final ClientConfig config;
+    private final int inputStage;   // Etapa de intrare
+    private final int outputStage;  // Etapa de ieșire
+    private long processingTime = 0; 
+    private int processedMessages = 0; 
+
+    public ResizeImagesFilter(ClientConfig config, int inputStage, int outputStage) {
+        this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
+    }
+
+    @Override
+    public void process(Blackboard blackboard) {
+        try {
+            while (true) {
+                long startTime = System.currentTimeMillis();
+                // Preia mesaj din coada corespunzătoare etapei de intrare
+                ReviewMessage message = blackboard.getFromStage(inputStage);
+                if (message == null) continue;
+
+                // Propagă mesajul de END către următoarea etapă
+                if (message == ReviewPipeline.END_MESSAGE) {
+                    blackboard.addToStage(outputStage, message);
+                    break;
+                }
+
+                // Redimensionează imaginea (doar dacă este activat în config)
+                if (config.resizeImages && message.attachment != null) {
+                    message.attachment = message.attachment.toLowerCase();
+                }
+
+                // Trimite mesajul la următoarea etapă
+                blackboard.addToStage(outputStage, message);
+                processedMessages++; // Incrementarea numarului de mesaje procesate
+                long endTime = System.currentTimeMillis(); // Masurarea timpului de sfarsit
+                processingTime += (endTime - startTime); 
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+    public long getProcessingTime() {
+        return processingTime;
+    }
+
+    public int getProcessedMessages() {
+        return processedMessages;
+    }
+}
+
+class SentimentDetectionFilter implements Filter {
+    private final ClientConfig config;
+    private final int inputStage;
+    private final int outputStage;
+    private long processingTime = 0; 
+    private int processedMessages = 0;
+
+    public SentimentDetectionFilter(ClientConfig config, int inputStage, int outputStage) {
+        this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
+    }
+
+    @Override
+    public void process(Blackboard blackboard) {
+        try {
+            while (true) {
+                long startTime = System.currentTimeMillis();
+                ReviewMessage message = blackboard.getFromStage(inputStage);
+                if (message == null) continue;
+
+                if (message == ReviewPipeline.END_MESSAGE) {
+                    blackboard.addToStage(outputStage, message);
+                    break;
+                }
+
+                if (config.detectSentiment && message.reviewText != null) {
+                    int upper = 0, lower = 0;
+                    for (char c : message.reviewText.toCharArray()) {
+                        if (Character.isUpperCase(c)) upper++;
+                        else if (Character.isLowerCase(c)) lower++;
+                    }
+                    
+                    // Adăugăm sufixul corespunzător
+                    if (upper > lower) message.reviewText += " +";
+                    else if (lower > upper) message.reviewText += " -";
+                    else message.reviewText += " =";
+                }
+
+                blackboard.addToStage(outputStage, message);
+                processedMessages++; 
+                long endTime = System.currentTimeMillis(); 
+                processingTime += (endTime - startTime); 
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -297,46 +341,46 @@ class CheckPoliticalPropagandaFilter implements Filter {
 
 class SentimentDetectionPlusFilter implements Filter {
     private final ClientConfig config;
+    private final int inputStage;
+    private final int outputStage;
     private long processingTime = 0; 
-    private int processedMessages = 0; 
+    private int processedMessages = 0;
 
-    public SentimentDetectionPlusFilter(ClientConfig config) {
+    public SentimentDetectionPlusFilter(ClientConfig config, int inputStage, int outputStage) {
         this.config = config;
+        this.inputStage = inputStage;
+        this.outputStage = outputStage;
     }
 
     @Override
     public void process(Blackboard blackboard) {
         try {
             while (true) {
-                ReviewMessage message = blackboard.getMessage();
                 long startTime = System.currentTimeMillis();
-                if (message == null) 
-                    continue;
+                ReviewMessage message = blackboard.getFromStage(inputStage);
+                if (message == null) continue;
+
                 if (message == ReviewPipeline.END_MESSAGE) {
-                    blackboard.addMessage(message);
+                    blackboard.addToStage(outputStage, message);
                     break;
                 }
 
-                // Detecteaza sentimentul cu etichete suplimentare daca filtrul este activat
                 if (config.detectSentimentPlus && message.reviewText != null) {
-                    int upperCaseCount = 0, lowerCaseCount = 0;
+                    int upper = 0, lower = 0;
                     for (char c : message.reviewText.toCharArray()) {
-                        if (Character.isUpperCase(c)) 
-                            upperCaseCount++;
-                        else if (Character.isLowerCase(c))
-                             lowerCaseCount++;
+                        if (Character.isUpperCase(c)) upper++;
+                        else if (Character.isLowerCase(c)) lower++;
                     }
-
-                    // Adauga o eticheta in functie de sentiment
-                    if (upperCaseCount > lowerCaseCount)
-                         message.reviewText += " (Positive)";
-                    else if (lowerCaseCount > upperCaseCount)
-                         message.reviewText += " (Negative)";
+                    
+                    // Adăugăm eticheta detaliată
+                    if (upper > lower) message.reviewText += " (Positive)";
+                    else if (lower > upper) message.reviewText += " (Negative)";
                     else message.reviewText += " (Neutral)";
                 }
-                blackboard.addMessage(message);
-                processedMessages++;
-                long endTime = System.currentTimeMillis();
+
+                blackboard.addToStage(outputStage, message);
+                processedMessages++; 
+                long endTime = System.currentTimeMillis(); 
                 processingTime += (endTime - startTime);
             }
         } catch (InterruptedException e) {
@@ -351,7 +395,6 @@ class SentimentDetectionPlusFilter implements Filter {
         return processedMessages;
     }
 }
-
 class ConcurrentBlackboard {
     public static void main(String[] args) throws InterruptedException {
         Map<String, String> buyers = new HashMap<>();
@@ -361,87 +404,58 @@ class ConcurrentBlackboard {
 
         ClientConfig client1Config = new ClientConfig(true, true, true, true, true, false);
 
-        Blackboard blackboard = new Blackboard();
+        // Blackboard cu 7 cozi (0-6) pentru cele 6 filtre + o coadă finală
+        Blackboard blackboard = new Blackboard(7);
 
-        ExecutorService executor = Executors.newFixedThreadPool(6);
-
-        CheckProfanitiesFilter profanityFilter = new CheckProfanitiesFilter(client1Config);
-        CheckBuyerFilter buyerFilter = new CheckBuyerFilter(buyers, client1Config);
-        ResizeImagesFilter resizeFilter = new ResizeImagesFilter(client1Config);
-        SentimentDetectionFilter sentimentFilter = new SentimentDetectionFilter(client1Config);
-        CheckPoliticalPropagandaFilter propagandaFilter = new CheckPoliticalPropagandaFilter(client1Config);
-        SentimentDetectionPlusFilter sentimentPlusFilter = new SentimentDetectionPlusFilter(client1Config);
-
-        executor.execute(() -> profanityFilter.process(blackboard));
-        executor.execute(() -> buyerFilter.process(blackboard));
-        executor.execute(() -> resizeFilter.process(blackboard));
-        executor.execute(() -> propagandaFilter.process(blackboard));
-        executor.execute(() -> sentimentFilter.process(blackboard));
-        executor.execute(() -> sentimentPlusFilter.process(blackboard));
-
-        List<ReviewMessage> messages = Arrays.asList(
-                new ReviewMessage("John", "Laptop", "ok", "PICTURE"),
-                new ReviewMessage("Mary", "Phone", "@#$%", "IMAGE"),
-                new ReviewMessage("Peter", "Phone", "GREAT", "ManyPictures"),
-                new ReviewMessage("Ann", "Book", "So GOOD", "Image"),
-                new ReviewMessage("Alice", "Tablet", "I love this +++", "TabletImage"),
-                new ReviewMessage("Bob", "Laptop", "This is amazing ---", "LaptopImage")
+        List<Filter> filters = Arrays.asList(
+            new CheckProfanitiesFilter(client1Config, 0, 1),      // Stage 0 → 1
+            new CheckBuyerFilter(buyers, client1Config, 1, 2),     // Stage 1 → 2
+            new CheckPoliticalPropagandaFilter(client1Config, 2, 3), // Stage 2 → 3
+            new ResizeImagesFilter(client1Config, 3, 4),           // Stage 3 → 4
+            new SentimentDetectionFilter(client1Config, 4, 5),     // Stage 4 → 5
+            new SentimentDetectionPlusFilter(client1Config, 5, 6)  // Stage 5 → 6
         );
 
-        long startTime = System.currentTimeMillis();
+        ExecutorService executor = Executors.newFixedThreadPool(filters.size());
 
-        for (ReviewMessage message : messages) {
-            blackboard.addMessage(message);
+        // Pornește toate filtrele
+        for (Filter filter : filters) {
+            executor.execute(() -> filter.process(blackboard));
         }
 
-        blackboard.addMessage(ReviewPipeline.END_MESSAGE);
+        // Mesaje de intrare
+        List<ReviewMessage> messages = Arrays.asList(
+            new ReviewMessage("John", "Laptop", "ok", "PICTURE"),
+            new ReviewMessage("Mary", "Phone", "@#$%", "IMAGE"),
+            new ReviewMessage("Peter", "Phone", "GREAT", "ManyPictures"),
+            new ReviewMessage("Ann", "Book", "So GOOD", "Image"),
+            new ReviewMessage("Alice", "Tablet", "I love this +++", "TabletImage"),
+            new ReviewMessage("Bob", "Laptop", "This is amazing ---", "LaptopImage")
+        );
 
+        // Adaugă mesaje în prima etapă (coada 0)
+        for (ReviewMessage message : messages) {
+            blackboard.addToStage(0, message);
+        }
+        blackboard.addToStage(0, ReviewPipeline.END_MESSAGE);
 
+        // Așteaptă terminarea procesării
         executor.shutdown();
         executor.awaitTermination(2, TimeUnit.SECONDS);
 
-        long endTime = System.currentTimeMillis();
-        long totalTime = endTime - startTime; 
-
+        // Colectează rezultatele din ultima etapă (coada 6)
         List<ReviewMessage> processedMessages = new ArrayList<>();
         ReviewMessage message;
-        while ((message = blackboard.getMessage()) != null) {
-            if (message == ReviewPipeline.END_MESSAGE) break;
+        while ((message = blackboard.getFromStage(6)) != null) {
+            if (message == ReviewPipeline.END_MESSAGE) {
+                break;
+            }
             processedMessages.add(message);
         }
-        System.out.println(" Rezultate");
-        System.out.println("Timpul total de procesare: " + totalTime + " ms");
-        System.out.println("Throughput: " + (double) messages.size() / (totalTime / 1000.0) + " mesaje/secunda");
 
-        System.out.println("\n Detalii Filtre ");
-        System.out.println("1. CheckProfanitiesFilter:");
-        System.out.println("   - Timp de procesare: " + profanityFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + profanityFilter.getProcessedMessages());
-
-        System.out.println("2. CheckBuyerFilter:");
-        System.out.println("   - Timp de procesare: " + buyerFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + buyerFilter.getProcessedMessages());
-
-        System.out.println("3. ResizeImagesFilter:");
-        System.out.println("   - Timp de procesare: " + resizeFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + resizeFilter.getProcessedMessages());
-
-        System.out.println("4. SentimentDetectionFilter:");
-        System.out.println("   - Timp de procesare: " + sentimentFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + sentimentFilter.getProcessedMessages());
-
-        System.out.println("5. CheckPoliticalPropagandaFilter:");
-        System.out.println("   - Timp de procesare: " + propagandaFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + propagandaFilter.getProcessedMessages());
-
-        System.out.println("6. SentimentDetectionPlusFilter:");
-        System.out.println("   - Timp de procesare: " + sentimentPlusFilter.getProcessingTime() + " ms");
-        System.out.println("   - Mesaje procesate: " + sentimentPlusFilter.getProcessedMessages());
-
-        System.out.println("\n Mesaje procesate:");
-
+        // Afișează rezultatele
         for (ReviewMessage msg : processedMessages) {
             System.out.println(msg);
         }
     }
-} 
+}
