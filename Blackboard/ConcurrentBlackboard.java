@@ -66,7 +66,13 @@ interface Filter {
     void process(Blackboard blackboard);
 }
 
-class CheckProfanitiesFilter implements Filter {
+interface FilterMetrics {
+    long getProcessingTime();
+    int getProcessedMessages();
+}
+
+
+class CheckProfanitiesFilter implements Filter,FilterMetrics {
     private final ClientConfig config;
     private final int inputStage;   // Etapa (coada) de intrare
     private final int outputStage;  // Etapa (coada) de ieșire
@@ -118,7 +124,7 @@ class CheckProfanitiesFilter implements Filter {
         return processedMessages;
     }
 }
-class CheckBuyerFilter implements Filter {
+class CheckBuyerFilter implements Filter, FilterMetrics{
     private final Map<String, String> buyers;
     private final ClientConfig config;
     private final int inputStage;   // Etapa de intrare
@@ -175,7 +181,7 @@ class CheckBuyerFilter implements Filter {
     }
 }
 
-class CheckPoliticalPropagandaFilter implements Filter {
+class CheckPoliticalPropagandaFilter implements Filter, FilterMetrics {
     private final ClientConfig config;
     private final int inputStage;   // Etapa de intrare
     private final int outputStage;  // Etapa de ieșire
@@ -230,7 +236,7 @@ class CheckPoliticalPropagandaFilter implements Filter {
     }
 }
 
-class ResizeImagesFilter implements Filter {
+class ResizeImagesFilter implements Filter, FilterMetrics {
     private final ClientConfig config;
     private final int inputStage;   // Etapa de intrare
     private final int outputStage;  // Etapa de ieșire
@@ -282,7 +288,7 @@ class ResizeImagesFilter implements Filter {
     }
 }
 
-class SentimentDetectionFilter implements Filter {
+class SentimentDetectionFilter implements Filter, FilterMetrics {
     private final ClientConfig config;
     private final int inputStage;
     private final int outputStage;
@@ -339,7 +345,7 @@ class SentimentDetectionFilter implements Filter {
     }
 }
 
-class SentimentDetectionPlusFilter implements Filter {
+class SentimentDetectionPlusFilter implements Filter, FilterMetrics {
     private final ClientConfig config;
     private final int inputStage;
     private final int outputStage;
@@ -387,7 +393,7 @@ class SentimentDetectionPlusFilter implements Filter {
             Thread.currentThread().interrupt();
         }
     }
-    public long getProcessingTime() {
+        public long getProcessingTime() {
         return processingTime;
     }
 
@@ -417,6 +423,9 @@ class ConcurrentBlackboard {
         );
 
         ExecutorService executor = Executors.newFixedThreadPool(filters.size());
+
+        // **Începe măsurarea timpului**
+        long startTime = System.currentTimeMillis();
 
         // Pornește toate filtrele
         for (Filter filter : filters) {
@@ -453,9 +462,36 @@ class ConcurrentBlackboard {
             processedMessages.add(message);
         }
 
-        // Afișează rezultatele
+        // **Înregistrează timpul de finalizare**
+        long endTime = System.currentTimeMillis();
+        long totalExecutionTime = endTime - startTime; // Calculează durata totală în milisecunde
+        double totalExecutionTimeSeconds = totalExecutionTime / 1000.0; // Convertire în secunde
+
+        // Afișează rezultatele mesajelor filtrate
         for (ReviewMessage msg : processedMessages) {
             System.out.println(msg);
         }
+
+        // **Număr total de mesaje procesate în ultima coadă**
+        int totalProcessedMessages = processedMessages.size();
+
+        // **Calculează throughput-ul**
+        double throughput = totalProcessedMessages / totalExecutionTimeSeconds;
+
+        // Afișează măsurătorile filtrelor
+        System.out.println("\nMăsurătorile filtrelor:");
+        for (Filter filter : filters) {
+            if (filter instanceof FilterMetrics) {
+                FilterMetrics metrics = (FilterMetrics) filter;
+                System.out.println(filter.getClass().getSimpleName() + 
+                    " - Time: " + metrics.getProcessingTime() + " ms, Messages: " + metrics.getProcessedMessages());
+            }
+        }
+
+        // **Afișează timpul total de execuție**
+        System.out.println("\nTimp total de executie al sistemului: " + totalExecutionTime + " ms");
+
+        // **Afișează throughput-ul**
+        System.out.println("Throughput: " + String.format("%.2f", throughput) + " mesaje/secundă");
     }
 }
